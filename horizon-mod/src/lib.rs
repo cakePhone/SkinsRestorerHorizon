@@ -278,6 +278,9 @@ fn fetch_skin(name: &str) -> Result<StoredSkin, String> {
         .map_err(|error| format!("Mojang profile lookup failed: {error}"))?
         .into_string()
         .map_err(|error| format!("Mojang profile answer was unreadable: {error}"))?;
+    if body.trim().is_empty() {
+        return Err(format!("No Minecraft account named {name}."));
+    }
     let profile: MojangProfile = serde_json::from_str(&body)
         .map_err(|error| format!("Mojang profile answer was not JSON: {error}"))?;
     let session_url = format!(
