@@ -574,6 +574,16 @@ mod tests {
     }
 
     #[test]
+    fn the_config_round_trips_a_stored_skin() {
+        let mut skins = BTreeMap::new();
+        skins.insert(uuid_key(7), skin("Notch", "e30="));
+        let text = serde_json::to_string(&SkinsFile { skins }).expect("the config");
+        let back: SkinsFile = serde_json::from_str(&text).expect("the config again");
+        assert_eq!(back.skins[&uuid_key(7)].name, "Notch");
+        assert_eq!(back.skins[&uuid_key(7)].value, "e30=");
+    }
+
+    #[test]
     fn only_minecraft_account_names_are_looked_up() {
         assert!(valid_account_name("Notch"));
         assert!(valid_account_name("a_1"));
