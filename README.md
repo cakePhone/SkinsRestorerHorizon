@@ -11,8 +11,10 @@ implementation of the SkinsRestorer idea; the Java plugin's code is not used.
 ## Requirements
 
 The mod uses the `player_login_profile` hook, which is part of the Horizon mod
-API in the accompanying API change. It needs a game build with that hook and
-its SDK; a build without it refuses the mod at load.
+API in [horizon-rust/horizon#18586](https://github.com/horizon-rust/horizon/issues/18586)
+and [horizon-rust/horizon#18587](https://github.com/horizon-rust/horizon/pull/18587).
+It needs a game build with that hook and its SDK; a build without it refuses the
+mod at load.
 
 The manifest pins Horizon `baea2549…` as the base. After the API change is
 merged, update `[native].horizon` to that merge commit and rebuild.
