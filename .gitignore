@@ -1,0 +1,11 @@
+# Horizon mod API build state
+.horizon/
+horizon-mod/target/
+
+# Packaged mods
+*.hmod
+*.hnmod
+uses.json
+
+# Minisign secret keys (never commit)
+*.key
