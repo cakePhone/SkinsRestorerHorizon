@@ -1,29 +1,25 @@
 //! SkinsRestorer for Horizon servers: a stored skin replaces a player's
 //! `textures` property at login, before the server sends the profile.
 //!
-//! `/skin set <name>` looks the account up on Mojang's public services on a
-//! worker thread and stores its signed `textures` property. The new skin is
-//! sent the next time the player logs in. `/skin clear` restores the player's
-//! own skin, `/skin update` fetches the stored name again and `/skin` shows
-//! what is stored. Operators may pass a player as the last argument to change
-//! someone else's skin.
+//! `/skin set <name>` asks the game's own Minecraft profile resolver, the one
+//! behind `/fetchprofile` and dynamic player heads, for the account's signed
+//! `textures` property and stores it. The new skin is sent the next time the
+//! player logs in. `/skin clear` restores the player's own skin, `/skin update`
+//! fetches the stored name again and `/skin` shows what is stored. Operators
+//! may pass a player as the last argument to change someone else's skin.
 
 #![deny(unsafe_code)]
 
 use mod_api::{
     self, Command, CommandArgumentValue, CommandSource, Config, ConfigFile, ConfigKind,
-    ConfigLoadingEvent, ConfigPath, ConfigReloadingEvent, Flow, Hooks, HostSide,
-    PlayerLoginProfileEvent, PlayerRef, ProfileProperty, RegisterCommandsEvent,
+    ConfigLoadingEvent, ConfigPath, ConfigReloadingEvent, Flow, GameProfile, Hooks, HostSide,
+    PlayerLoginProfileEvent, PlayerRef, ProfileProperty, ProfileResolution, RegisterCommandsEvent,
     RegisterConfigsEvent, RunModCommandEvent, ServerHost, ServerTickEvent, ServerTickPhase, Text,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    sync::{
-        Mutex, RwLock,
-        mpsc::{self, Receiver, Sender},
-    },
-    time::Duration,
+    sync::{Mutex, RwLock},
 };
 
 /// The mod's config: a JSON file of the stored skins, keyed by the player's
@@ -55,30 +51,27 @@ struct SkinsFile {
     skins: BTreeMap<String, StoredSkin>,
 }
 
-/// A finished lookup, handed from the worker thread to the server tick.
-struct FetchResult {
+/// A lookup the game's profile resolver is still running, kept until a later tick answers it.
+struct PendingLookup {
     player: PlayerRef,
     requested_by: Option<PlayerRef>,
     /// The player's name when the lookup started, for the requester's answer.
     target_name: Option<String>,
     /// The name looked up, for the answer.
     looked_up: String,
-    result: Result<StoredSkin, String>,
 }
 
 struct SkinsRestorer {
     skins: RwLock<BTreeMap<String, StoredSkin>>,
-    fetch_tx: Sender<FetchResult>,
-    fetch_rx: Mutex<Receiver<FetchResult>>,
+    /// Lookups the resolver is still running, in the order they started.
+    pending: Mutex<Vec<PendingLookup>>,
 }
 
 impl Default for SkinsRestorer {
     fn default() -> Self {
-        let (fetch_tx, fetch_rx) = mpsc::channel();
         Self {
             skins: RwLock::new(BTreeMap::new()),
-            fetch_tx,
-            fetch_rx: Mutex::new(fetch_rx),
+            pending: Mutex::new(Vec::new()),
         }
     }
 }
@@ -129,76 +122,135 @@ impl SkinsRestorer {
         skins.get(&uuid_key(player.uuid())).cloned()
     }
 
-    /// Starts a lookup on a worker thread; the next `server_tick` stores it.
-    fn fetch(
-        &self,
-        player: PlayerRef,
-        requested_by: Option<PlayerRef>,
-        target_name: Option<String>,
-        name: String,
-    ) {
-        let sender = self.fetch_tx.clone();
-        let looked_up = name.clone();
-        std::thread::spawn(move || {
-            let result = fetch_skin(&name);
-            let _ = sender.send(FetchResult {
-                player,
-                requested_by,
-                target_name,
-                looked_up,
-                result,
-            });
-        });
+    /// Asks the game's resolver for a name. An answer it already has is applied
+    /// now; a lookup still running is kept for `poll`. Returns whether the
+    /// lookup is still running.
+    fn start_lookup(&self, host: &mut dyn ServerHost, lookup: PendingLookup) -> bool {
+        // A newer choice replaces this player's older lookup.
+        match self.pending.lock() {
+            Ok(mut pending) => pending.retain(|other| other.player != lookup.player),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .retain(|other| other.player != lookup.player),
+        }
+        let resolution = host.profiles().resolve_name(&lookup.looked_up);
+        if self.apply(host, &lookup, resolution) {
+            return false;
+        }
+        match self.pending.lock() {
+            Ok(mut pending) => pending.push(lookup),
+            Err(poisoned) => poisoned.into_inner().push(lookup),
+        }
+        true
     }
 
-    /// Applies a finished lookup and answers the player and the requester.
-    fn finish_fetches(&self, host: &mut dyn ServerHost) {
-        let results: Vec<FetchResult> = match self.fetch_rx.lock() {
-            Ok(receiver) => receiver.try_iter().collect(),
-            Err(poisoned) => poisoned.into_inner().try_iter().collect(),
+    /// Polls every lookup the resolver is still running.
+    fn poll(&self, host: &mut dyn ServerHost) {
+        let lookups = match self.pending.lock() {
+            Ok(mut pending) => std::mem::take(&mut *pending),
+            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
         };
-        for result in results {
-            match result.result {
-                Ok(skin) => {
-                    let key = uuid_key(result.player.uuid());
-                    match self.skins.write() {
-                        Ok(mut skins) => {
-                            skins.insert(key, skin.clone());
-                        }
-                        Err(poisoned) => {
-                            poisoned.into_inner().insert(key, skin.clone());
-                        }
-                    }
-                    self.save(host);
-                    let _ = result.player.tell(
-                        host,
-                        Text::literal(format!(
-                            "Your skin is now {}. Reconnect to see it.",
-                            skin.name
-                        )),
-                    );
-                    if let Some(requester) = result.requested_by
-                        && requester != result.player
-                    {
-                        let target = result
-                            .target_name
-                            .unwrap_or_else(|| "That player".to_owned());
-                        let _ = requester.tell(
-                            host,
-                            Text::literal(format!("Set {target}'s skin to {}.", skin.name)),
-                        );
-                    }
-                }
-                Err(error) => {
-                    let line = format!("Skin lookup for {} failed: {error}", result.looked_up);
-                    let _ = result.player.tell(host, Text::literal(line.clone()));
-                    if let Some(requester) = result.requested_by
-                        && requester != result.player
-                    {
-                        let _ = requester.tell(host, Text::literal(line));
-                    }
-                }
+        if lookups.is_empty() {
+            return;
+        }
+        let mut remaining = Vec::new();
+        for lookup in lookups {
+            let resolution = host.profiles().resolve_name(&lookup.looked_up);
+            if !self.apply(host, &lookup, resolution) {
+                remaining.push(lookup);
             }
+        }
+        if !remaining.is_empty() {
+            match self.pending.lock() {
+                Ok(mut pending) => pending.extend(remaining),
+                Err(poisoned) => poisoned.into_inner().extend(remaining),
+            }
+        }
+    }
+
+    /// Applies the resolver's answer: stores the skin and answers the player
+    /// and the requester. Returns false while the lookup is still running.
+    fn apply(
+        &self,
+        host: &mut dyn ServerHost,
+        lookup: &PendingLookup,
+        resolution: ProfileResolution,
+    ) -> bool {
+        let profile = match resolution {
+            ProfileResolution::Pending => return false,
+            ProfileResolution::Done(None) => {
+                log::info!(
+                    "SkinsRestorer: no profile for {} (no such account or no answer)",
+                    lookup.looked_up
+                );
+                self.answer_error(
+                    host,
+                    lookup,
+                    format!(
+                        "No Minecraft account named {}, or the lookup failed. Try again in a minute.",
+                        lookup.looked_up
+                    ),
+                );
+                return true;
+            }
+            ProfileResolution::Done(Some(profile)) => profile,
+            other => {
+                self.answer_error(
+                    host,
+                    lookup,
+                    format!("The profile lookup returned an unknown answer: {other:?}"),
+                );
+                return true;
+            }
+        };
+        let skin = match stored_skin(&profile) {
+            Ok(skin) => skin,
+            Err(error) => {
+                log::warn!("SkinsRestorer: {error}");
+                self.answer_error(host, lookup, error);
+                return true;
+            }
+        };
+        let key = uuid_key(lookup.player.uuid());
+        log::info!("SkinsRestorer: stored skin {} for {key}", skin.name);
+        match self.skins.write() {
+            Ok(mut skins) => {
+                skins.insert(key, skin.clone());
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().insert(key, skin.clone());
+            }
+        }
+        self.save(host);
+        let _ = lookup.player.tell(
+            host,
+            Text::literal(format!(
+                "Your skin is now {}. Reconnect to see it.",
+                skin.name
+            )),
+        );
+        if let Some(requester) = lookup.requested_by
+            && requester != lookup.player
+        {
+            let target = lookup
+                .target_name
+                .clone()
+                .unwrap_or_else(|| "That player".to_owned());
+            let _ = requester.tell(
+                host,
+                Text::literal(format!("Set {target}'s skin to {}.", skin.name)),
+            );
+        }
+        true
+    }
+
+    /// Answers the player and the requester with a failed lookup.
+    fn answer_error(&self, host: &mut dyn ServerHost, lookup: &PendingLookup, line: String) {
+        let _ = lookup.player.tell(host, Text::literal(line.clone()));
+        if let Some(requester) = lookup.requested_by
+            && requester != lookup.player
+        {
+            let _ = requester.tell(host, Text::literal(line));
         }
     }
 }
@@ -243,67 +295,17 @@ fn login_skin(skins: &BTreeMap<String, StoredSkin>, player: u128) -> Option<Stor
         .cloned()
 }
 
-/// One Mojang profile lookup: `api.mojang.com/users/profiles/minecraft/<name>`.
-#[derive(Deserialize)]
-struct MojangProfile {
-    id: String,
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct MojangProperty {
-    name: String,
-    value: String,
-    #[serde(default)]
-    signature: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct MojangSessionProfile {
-    properties: Vec<MojangProperty>,
-}
-
-/// Looks an account's signed `textures` property up on Mojang's public
-/// services. Runs on a worker thread; never on the server tick.
-fn fetch_skin(name: &str) -> Result<StoredSkin, String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout(Duration::from_secs(15))
-        .user_agent(concat!("SkinsRestorerHorizon/", env!("CARGO_PKG_VERSION")))
-        .build();
-    let profile_url = format!("https://api.mojang.com/users/profiles/minecraft/{name}");
-    let body = agent
-        .get(&profile_url)
-        .call()
-        .map_err(|error| format!("Mojang profile lookup failed: {error}"))?
-        .into_string()
-        .map_err(|error| format!("Mojang profile answer was unreadable: {error}"))?;
-    if body.trim().is_empty() {
-        return Err(format!("No Minecraft account named {name}."));
-    }
-    let profile: MojangProfile = serde_json::from_str(&body)
-        .map_err(|error| format!("Mojang profile answer was not JSON: {error}"))?;
-    let session_url = format!(
-        "https://sessionserver.mojang.com/session/minecraft/profile/{}?unsigned=false",
-        profile.id
-    );
-    let body = agent
-        .get(&session_url)
-        .call()
-        .map_err(|error| format!("Mojang session lookup failed: {error}"))?
-        .into_string()
-        .map_err(|error| format!("Mojang session answer was unreadable: {error}"))?;
-    let session: MojangSessionProfile = serde_json::from_str(&body)
-        .map_err(|error| format!("Mojang session answer was not JSON: {error}"))?;
-    let textures = session
+/// The skin a resolved profile carries: its `textures` property.
+fn stored_skin(profile: &GameProfile) -> Result<StoredSkin, String> {
+    let textures = profile
         .properties
-        .into_iter()
+        .iter()
         .find(|property| property.name == "textures")
-        .ok_or_else(|| format!("{} has no skin property", profile.name))?;
+        .ok_or_else(|| format!("{} has no skin property.", profile.name))?;
     Ok(StoredSkin {
-        name: profile.name,
-        value: textures.value,
-        signature: textures.signature,
+        name: profile.name.clone(),
+        value: textures.value.clone(),
+        signature: textures.signature.clone(),
     })
 }
 
@@ -355,16 +357,23 @@ impl SkinsRestorer {
             _ => None,
         };
         let target_name = player.name(host);
-        self.fetch(player, requested_by, target_name.clone(), name.clone());
-        Self::feedback(host, format!("Looking up {name}..."));
-        if let Some(requester) = requested_by
-            && requester != player
-        {
-            let target = target_name.unwrap_or_else(|| "that player".to_owned());
-            let _ = requester.tell(
-                host,
-                Text::literal(format!("Looking up {name} for {target}...")),
-            );
+        let lookup = PendingLookup {
+            player,
+            requested_by,
+            target_name: target_name.clone(),
+            looked_up: name.clone(),
+        };
+        if self.start_lookup(host, lookup) {
+            Self::feedback(host, format!("Looking up {name}..."));
+            if let Some(requester) = requested_by
+                && requester != player
+            {
+                let target = target_name.unwrap_or_else(|| "that player".to_owned());
+                let _ = requester.tell(
+                    host,
+                    Text::literal(format!("Looking up {name} for {target}...")),
+                );
+            }
         }
         Flow::Cancel
     }
@@ -409,8 +418,15 @@ impl SkinsRestorer {
             Self::feedback(host, "No skin is stored; use /skin set <name> first.");
             return Flow::Cancel;
         };
-        self.fetch(*player, Some(*player), player.name(host), skin.name.clone());
-        Self::feedback(host, format!("Looking up {} again...", skin.name));
+        let lookup = PendingLookup {
+            player: *player,
+            requested_by: Some(*player),
+            target_name: player.name(host),
+            looked_up: skin.name.clone(),
+        };
+        if self.start_lookup(host, lookup) {
+            Self::feedback(host, format!("Looking up {} again...", skin.name));
+        }
         Flow::Cancel
     }
 
@@ -522,7 +538,7 @@ impl Hooks for SkinsRestorer {
 
     fn server_tick(&self, host: &mut dyn ServerHost, event: &mut ServerTickEvent<'_>) {
         if matches!(event.phase, ServerTickPhase::ServerTickStart { .. }) {
-            self.finish_fetches(host);
+            self.poll(host);
         }
     }
 }
@@ -549,6 +565,28 @@ mod tests {
         assert_eq!(property.value, "e30=");
         assert_eq!(property.signature.as_deref(), Some("signature"));
         assert!(login_skin(&skins, 8).is_none());
+    }
+
+    #[test]
+    fn a_resolved_profile_becomes_a_stored_skin() {
+        let profile = GameProfile::new(
+            7,
+            "Notch".into(),
+            vec![
+                ProfileProperty::new("cape".into(), "cape".into(), None),
+                ProfileProperty::new("textures".into(), "value".into(), Some("signature".into())),
+            ],
+        );
+        let skin = stored_skin(&profile).expect("the skin");
+        assert_eq!(skin.name, "Notch");
+        assert_eq!(skin.value, "value");
+        assert_eq!(skin.signature.as_deref(), Some("signature"));
+
+        let bare = GameProfile::new(8, "Alex".into(), Vec::new());
+        assert_eq!(
+            stored_skin(&bare).unwrap_err(),
+            "Alex has no skin property."
+        );
     }
 
     #[test]

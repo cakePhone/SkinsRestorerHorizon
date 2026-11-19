@@ -10,13 +10,13 @@ implementation of the SkinsRestorer idea; the Java plugin's code is not used.
 
 ## Requirements
 
-The mod uses the `player_login_profile` hook, which is part of the Horizon mod
-API in [horizon-rust/horizon#18586](https://github.com/horizon-rust/horizon/issues/18586)
-and [horizon-rust/horizon#18587](https://github.com/horizon-rust/horizon/pull/18587).
-It needs a game build with that hook and its SDK; a build without it refuses the
-mod at load.
+The mod uses two parts of the Horizon mod API from
+[horizon-rust/horizon#18586](https://github.com/horizon-rust/horizon/issues/18586)
+and [horizon-rust/horizon#18587](https://github.com/horizon-rust/horizon/pull/18587):
+the `player_login_profile` hook and the `profiles` service. It needs a game build
+with both and their SDK; a build without them refuses the mod at load.
 
-The manifest pins Horizon `baea2549…` as the base. After the API change is
+The manifest pins Horizon `85fbb96c…` as the base. After the API change is
 merged, update `[native].horizon` to that merge commit and rebuild.
 
 ## Commands
@@ -24,7 +24,7 @@ merged, update `[native].horizon` to that merge commit and rebuild.
 | Command | What it does |
 | --- | --- |
 | `/skin` | Shows the skin stored for you. |
-| `/skin set <name>` | Looks the Minecraft account `<name>` up on Mojang's public services and stores its signed skin for you. |
+| `/skin set <name>` | Resolves the Minecraft account `<name>` through the game's profile resolver and stores its signed skin for you. |
 | `/skin clear` | Forgets your stored skin; your own skin comes back. |
 | `/skin update` | Looks the stored name up again, picking up a skin the account changed. |
 | `/skin set <name> <player>` | Operators only: sets another player's skin. |
@@ -34,9 +34,10 @@ A skin is applied the next time the player logs in. Telling the player to
 reconnect is the honest answer until the mod API has a way to refresh an
 online player's profile.
 
-The lookup runs on a worker thread; the server tick never waits for Mojang.
-The answer is kept in `config/skinsrestorer/skins.json` on the server, or the
-world's `serverconfig/skinsrestorer/skins.json` when that copy exists.
+The lookup uses the game's own profile resolver in the background; the server
+tick never waits for Mojang. The answer is kept in
+`config/skinsrestorer/skins.json` on the server, or the world's
+`serverconfig/skinsrestorer/skins.json` when that copy exists.
 
 ## How it works
 
@@ -53,15 +54,14 @@ profile's wire limits are 16 properties, non-empty names of 64 UTF-16 units,
 values of 32767 and signatures of 1024; a stored skin that does not fit is not
 sent, and the player keeps their own skin.
 
-Skins are looked up from:
-
-- `https://api.mojang.com/users/profiles/minecraft/<name>` for the account's
-  UUID and canonical name;
-- `https://sessionserver.mojang.com/session/minecraft/profile/<uuid>?unsigned=false`
-  for the signed `textures` property.
-
-The lookup runs in a worker thread and the result is applied on the next
-server tick, so a slow or failing Mojang service cannot stall the server.
+Skins are resolved through `host.profiles()`, the game's Minecraft profile
+resolver, the one behind `/fetchprofile` and dynamic player heads. It asks
+Mojang's profile and session services for the account's UUID, current name and
+signed `textures` property, caches the answers and runs the request in the
+background. The mod calls `resolve_name` from `/skin set`, polls
+`ProfileResolution::Pending` from `server_tick`, and stores the answer when the
+resolver has it. The mod therefore links no HTTP or TLS client of its own; it
+uses the stack the game already links.
 
 ## Build and install
 
@@ -88,7 +88,7 @@ The project is a flat native mod under `horizon-mod/`:
 ```text
 horizon-mod/
   horizon-mod.toml     the mod's manifest and build pins
-  Cargo.toml           depends on the SDK's horizon-mod-api, ureq, serde
+  Cargo.toml           depends on the SDK's horizon-mod-api, serde and serde_json
   Cargo.lock           registry dependency pins
   src/lib.rs           the hooks, commands and skin lookup
 ```
@@ -107,7 +107,11 @@ The API change this mod needs lives in the Horizon repository:
   profile write-back before `LoginFinished`;
 - `crates/horizon-client/src/native_client_hooks.rs` and
   `crates/horizon-client/src/entry.rs`: the connection-thread callback into
-  the mod list.
+  the mod list;
+- `crates/horizon-mod-vocab/src/host/services.rs`: the `profiles` service and
+  its `ProfileResolution` answers;
+- `crates/horizon-client/src/game/host/services.rs`: the game's implementation
+  over its existing `skins::Resolver`.
 
 ## Credits
 
