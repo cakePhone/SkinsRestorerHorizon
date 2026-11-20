@@ -18,8 +18,10 @@ and [horizon-rust/horizon#18587](https://github.com/horizon-rust/horizon/pull/18
 the `player_login_profile` hook and the `profiles` service. It needs a game build
 with both and their SDK; a build without them refuses the mod at load.
 
-The manifest pins Horizon `85fbb96c…` as the base. After the API change is
-merged, update `[native].horizon` to that merge commit and rebuild.
+The API change merged as `76be143` (Horizon #18587). This release still pins
+`85fbb96c`, the PR head it was built and tested against. The next package will
+pin the signed Nightly/SDK that contains the merge; a commit without a signed
+SDK release cannot be built by the launcher.
 
 ## Commands
 
@@ -101,7 +103,7 @@ The pure tests run with:
 cargo test
 ```
 
-The API change this mod needs lives in the Horizon repository:
+The API change this mod needs is in Horizon main (merged as #18587):
 
 - `crates/horizon-mod-vocab/src/hooks/player_login_profile.rs`: the hook
   declaration;
