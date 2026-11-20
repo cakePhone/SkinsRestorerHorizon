@@ -5,8 +5,10 @@ skin replaces the player's signed `textures` property at login, before the
 server sends the profile, so the player's own client and everyone in the
 player list see it.
 
-This is a **server-side native mod** for the Horizon mod API. It is an original
-implementation of the SkinsRestorer idea; the Java plugin's code is not used.
+This is a **server-side native mod** for the Horizon mod API. It is a Horizon
+implementation of the SkinsRestorer idea, based on the SkinsRestorer project,
+and is licensed under GPL-3.0 like the original. It is not affiliated with or
+endorsed by the SkinsRestorer team.
 
 ## Requirements
 
@@ -116,8 +118,13 @@ The API change this mod needs lives in the Horizon repository:
 ## Credits
 
 SkinsRestorer was created by the SkinsRestorer team. This Horizon mod is an
-original implementation of the same idea and is not affiliated with Mojang,
-Microsoft or the SkinsRestorer project.
+implementation of the same idea, based on SkinsRestorer, and is not affiliated
+with Mojang, Microsoft or the SkinsRestorer project.
+
+## License
+
+GPL-3.0-only. See [LICENSE.txt](LICENSE.txt). The original SkinsRestorer is
+also GPL-3.0; its copyright notice is preserved in [NOTICE](NOTICE).
 
 ## AI note
 

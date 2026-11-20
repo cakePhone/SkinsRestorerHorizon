@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 //! SkinsRestorer for Horizon servers: a stored skin replaces a player's
 //! `textures` property at login, before the server sends the profile.
 //!
