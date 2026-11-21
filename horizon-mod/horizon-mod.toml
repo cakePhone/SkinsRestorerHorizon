@@ -1,6 +1,6 @@
 id = "skinsrestorer"
 name = "SkinsRestorer"
-version = "1.0.0"
+version = "1.0.1"
 description = "Changes players' skins on a Horizon server, before their login is accepted."
 authors = ["cakePhone"]
 license = "GPL-3.0-only"
@@ -10,5 +10,5 @@ capabilities = ["registries"]
 
 [native]
 game = "26.3"
-horizon = "85fbb96c0de9ec53cdbb6ea2ae96c023cf18b82b"
+horizon = "8f83e5c85ae3b9a117f742e8d91170c5c9080a06"
 mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"

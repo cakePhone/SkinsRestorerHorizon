@@ -18,10 +18,10 @@ and [horizon-rust/horizon#18587](https://github.com/horizon-rust/horizon/pull/18
 the `player_login_profile` hook and the `profiles` service. It needs a game build
 with both and their SDK; a build without them refuses the mod at load.
 
-The API change merged as `76be143` (Horizon #18587). This release still pins
-`85fbb96c`, the PR head it was built and tested against. The next package will
-pin the signed Nightly/SDK that contains the merge; a commit without a signed
-SDK release cannot be built by the launcher.
+The API change merged as `76be143` (Horizon #18587) and reached a signed build
+in Nightly `8f83e5c` (2026-11-21). The mod pins that Nightly's exact commit, so
+the launcher builds it against the signed SDK from
+`sdk-8f83e5c85ae3b9a117f742e8d91170c5c9080a06`.
 
 ## Commands
 
